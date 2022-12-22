@@ -1,10 +1,11 @@
 
 use std::env;
-use std::io::{Error, BufReader, BufRead};
+use std::io::{Error, BufReader, BufRead, stdout, Write};
 use std::fs::File;
 use std::collections::*;
 use std::net::{UdpSocket, Ipv4Addr, SocketAddrV4};
 use socket2::*;
+use std::mem::MaybeUninit;
 
 // CONSTANTS
 const CONFIG_PATH: &str = "paxos.conf"; // wrt target/<dir>
@@ -29,21 +30,20 @@ fn parse_cfg() -> Result<HashMap<String, SocketAddrV4>, Error> {
     Ok(cfg)
 }
 
-fn mcast_receiver(address: SocketAddrV4) -> Socket {
+fn mcast_receiver(address: &SocketAddrV4) -> Socket {
     // UNSPECIFIED address = make to OS choose the address
     // equivalent to INADDR_ANY
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
     .expect("failed to create socket");
 
-    //let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    println!("{:?}",address.ip());
 
     socket
     .join_multicast_v4(address.ip(), &Ipv4Addr::UNSPECIFIED)
     .expect("failed to join multicast group");
 
-    socket.set_reuse_address(true).unwrap();
-
-    socket.bind(&SockAddr::from(address)).expect("failed to join multicast group");
+    socket.set_reuse_address(true).expect("failed to set reuse address");
+    socket.bind(&SockAddr::from(address.to_owned())).expect("failed to bind");
     socket
 }
 
@@ -53,15 +53,65 @@ fn mcast_sender() -> UdpSocket {
     UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap()
 }
 
+fn paxos_encode(lon: &Vec<i32>) -> Vec<u8> {
+    // get an list of numbers
+    // convert each element to bytes (big endian for network)
+    // ungroup the bytes arrays (-> flatten) 
+    // put everything in a vector 
+    lon.iter()
+    .map(|x| x.to_be_bytes())
+    .flatten()
+    .collect()
+}
+
+fn paxos_decode(byte_array: &[MaybeUninit<u8>] , size: usize) -> Vec<i32> {
+
+    // use step by
+    for i in 0..size {
+        let x = unsafe {byte_array[i].assume_init()};
+        println!("{}",x);
+    };
+
+}
+
 // PAXOS ROLES
-fn acceptor(mut cfg: HashMap<String, SocketAddrV4>, id: u16) {
+fn acceptor(cfg: HashMap<String, SocketAddrV4>, id: u16) {
     println!("> acceptor {}", id);
     let s = mcast_sender();
-    let r = mcast_receiver(cfg.remove("acceptors").unwrap());
+    let r = mcast_receiver(cfg.get("acceptors").unwrap());
+
+    loop {
+        let mut recvbuf = [MaybeUninit::new(0); 64];
+        let (bytes_n, src_addr) = r.recv_from(&mut recvbuf)
+                                        .expect("Didn't receive data");
+        println!("bytes recv: {} from {}", bytes_n, 
+        src_addr.as_socket_ipv4().unwrap().ip());
+
+        for i in 0..bytes_n {
+            let x = unsafe {recvbuf[i].assume_init()};
+            println!("{}",x);
+        };
+
+        //println!("bufrecv: {:?}", recvbuf);
+        
+        stdout().flush().unwrap()
+    }
 }
 
 fn proposer(cfg: HashMap<String, SocketAddrV4>, id: u16) {
-    println!("Hello from proposer");
+    println!("> proposer {}", id);
+    let s = mcast_sender();
+    let r = mcast_receiver(cfg.get("proposers").unwrap());
+
+    loop {
+        let num: i32 = 100000;
+        let buf = num.to_be_bytes();
+        match s.send_to(&buf, cfg.get("acceptors").unwrap()) {
+            Ok(bytes_sent) => println!("sent {} bytes", bytes_sent),
+            Err(e) => panic!("couldn't send from proposer, err: {}", e)
+        }
+        return;
+    }
 }
 
 fn learner(cfg: HashMap<String, SocketAddrV4>, id: u16) {
