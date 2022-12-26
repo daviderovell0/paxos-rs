@@ -23,7 +23,8 @@ use socket2::*;
 use std::mem::MaybeUninit;
 
 // CONSTANTS
-const CONFIG_PATH: &str = "paxos.conf"; // wrt target/<dir>
+const CONFIG_PATH: &str = "paxos.conf"; // wrt repo home
+const QUORUM: i32 = 2;
 
 // AUX FUNCTIONS
 fn parse_cfg() -> Result<HashMap<String, SocketAddrV4>, Error> {
@@ -104,12 +105,12 @@ fn proposer(cfg: HashMap<String, SocketAddrV4>, id: u16) {
     .expect("no entry for key 'proposers' in config file"));
     // c-rnd, c-val, quorum (Q), highest-v-rnd (k) and its associated value (k-val)
     // for every paxos instance indexed by instance number
-    let mut state = HashMap::<i32, HashMap<&str, i32>>::new();
+    let mut states = HashMap::<i32, HashMap<&str, i32>>::new();
     let mut instance_counter = 0;
     
     loop {
 
-        let mut recvbuf = [MaybeUninit::new(0); 64];
+        let mut recvbuf = [MaybeUninit::new(0); 128];
         let (bytes_n, _src_addr) = r.recv_from(&mut recvbuf)
                                     .expect("Didn't receive data");
 
@@ -118,10 +119,11 @@ fn proposer(cfg: HashMap<String, SocketAddrV4>, id: u16) {
         let phase = inmsg[1];
 
         match phase {
-            0 => { // message received from client
+
+            0 => { // phase 1A: message received from client
                 let value = inmsg[2];
                 // save new instance
-                state.insert(instance_counter,
+                states.insert(instance_counter,
                 HashMap::from([
                     ("c-rnd", 0),
                     ("c-val", value),
@@ -133,17 +135,45 @@ fn proposer(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                 // send 1A
                 let outmsg = paxos_encode(&[instance_counter, 1, 0]);
                 match s.send_to(&outmsg, cfg.get("acceptors").unwrap()) {
-                    Ok(_) => println!("{}-1A | val: {}", instance_counter, value),
+                    Ok(_) => println!("{}-1A | received val: {}", instance_counter, value),
                     Err(e) => panic!("couldn't send from proposer, err: {}", e)
                 }
                 instance_counter += 1;
-
             },
-            1 => { // received 1B from acceptor
+
+            1 => { // phase 2A: received 1B from acceptor
+                match states.get_mut(&instance) {
+                    Some(state) => {
+                        if state["c-rnd"] == inmsg[2] {
+                            let mut value = state["c-val"];
+                            // increase quorum
+                            state.insert("q", state["q"] + 1 );
+                            // k
+                            if inmsg[3] > state["k"] { 
+                                state.insert("k", inmsg[3]);
+                                state.insert("k-val", inmsg[4]);
+                                value = state["k-val"];
+                            }
+                            
+                            if state["q"] >= QUORUM { // if quorum met
+                                println!("quorum reached: {}", state["q"]);
+                                // send 2A to acceptors
+                                let payload = [instance, 2, state["c-rnd"], value];
+                                let outmsg = paxos_encode(&payload);
+                                match s.send_to(&outmsg, cfg.get("acceptors").unwrap()) {
+                                    Ok(_) => println!("{}-2A | payload: {:?}", instance, &payload),
+                                    Err(e) => panic!("couldn't send from proposer, err: {}", e)
+                                }
+                            }
+                        }
+                    },
+                    None => panic!("Instance number {} was never proposed", instance)
+                }
+                //println!("{:?}", states.get(&instance).unwrap())
 
             },
             _ => {
-                panic!("Phase {} not recognised", phase);
+                panic!("acceptor {}, phase {} not recognised", id, phase);
             }
 
         }
@@ -157,45 +187,136 @@ fn acceptor(cfg: HashMap<String, SocketAddrV4>, id: u16) {
     let s = mcast_sender();
     let r = mcast_receiver(cfg.get("acceptors")
     .expect("no entry for key 'acceptors' in config file"));
+    // rnd, v-rnd, v-val
+    // for every paxos instance indexed by instance number
+    let mut states = HashMap::<i32, HashMap<&str, i32>>::new();
 
     loop {
-        let mut recvbuf = [MaybeUninit::new(0); 64];
+        let mut recvbuf = [MaybeUninit::new(0); 128];
         let (bytes_n, _src_addr) = r.recv_from(&mut recvbuf)
                                     .expect("Didn't receive data");
 
-        let msg = paxos_decode(&recvbuf, bytes_n);
+        let inmsg = paxos_decode(&recvbuf, bytes_n);
+        let instance = inmsg[0]; // paxos instance number
+        let phase = inmsg[1];
+        let init_state = HashMap::from([
+            ("rnd", -1),
+            ("v-rnd", -1),
+            ("v-val", -1)
+        ]);
 
-        println!("bufrecv: {:?}", msg);
-        
+        match phase {
+            1 => { // phase 1B: received 1A from proposer
+                // get current paxos instance or initialise it if first time
+                let state = states.entry(instance)
+                .or_insert(init_state);
+                
+                if inmsg[2] > state["rnd"] { // inmsg[2] is c-rnd
+                    state.insert("rnd", inmsg[2]);
+
+                    // send 1B
+                    let payload = [instance, 1, state["rnd"], state["v-rnd"], state["v-val"]];
+                    let outmsg = paxos_encode(&payload);
+                    match s.send_to(&outmsg, cfg.get("proposers").unwrap()) {
+                        Ok(_) => println!("{}-1B | payload: {:?}", instance, payload),
+                        Err(e) => panic!("couldn't send from acceptor, err: {}", e)
+                    }
+                }
+            },
+            2 => { // phase 2B: received 1A from proposer
+                match states.get_mut(&instance) {
+                    Some(state) => {
+                        if inmsg[2] >= state["rnd"] {
+                            state.insert("v-rnd", inmsg[2]);
+                            state.insert("v-val", inmsg[3]);
+
+                            //send 2B to learners
+                            let payload = [instance, 2, state["v-rnd"], state["v-val"]];
+                            let outmsg = paxos_encode(&payload);
+                            match s.send_to(&outmsg, cfg.get("learners").unwrap()) {
+                                Ok(_) => println!("{}-2B | payload: {:?}", instance, payload),
+                                Err(e) => panic!("couldn't send from acceptor, err: {}", e)
+                            }
+                        }
+                    },
+                    None => panic!("Instance number {} was never proposed", instance)
+                }
+            },
+            _ => {
+                panic!("acceptor {}, phase {} not recognised", id, phase);
+            }
+            
+        }
         stdout().flush().unwrap()
     }
 }
 
 fn learner(cfg: HashMap<String, SocketAddrV4>, id: u16) {
-    println!("> learner {}", id);
+    //println!("> learner {}", id);
     let s = mcast_sender();
     let r = mcast_receiver(cfg.get("learners")
     .expect("no entry for key 'learners' in config file"));
-
+    let mut learned_index = 0;
+    // dict of (v-rnd, v-val, quorum) - indexed by instance
+    let mut states = HashMap::<i32, (i32, i32, i32)>::new();
+   
     loop {
-
-        let mut recvbuf = [MaybeUninit::new(0); 64];
+        let mut recvbuf = [MaybeUninit::new(0); 128];
         let (bytes_n, _src_addr) = r.recv_from(&mut recvbuf)
                                     .expect("Didn't receive data");
 
-        let msg = paxos_decode(&recvbuf, bytes_n);
+        let inmsg = paxos_decode(&recvbuf, bytes_n);
+        let instance = inmsg[0]; // paxos instance number
+        let phase = inmsg[1];
 
-        println!("bufrecv: {:?}", msg);
         
-        
-        let msg = paxos_encode(&[1,2,3]);
-        match s.send_to(&msg, cfg.get("acceptors").unwrap()) {
-            Ok(bytes_sent) => println!("sent {} bytes", bytes_sent),
-            Err(e) => panic!("couldn't send from proposer, err: {}", e)
+        match phase {
+            2 => { // phase 3: received 2B from acceptor
+                // get quorum for received instance and update the states of the values
+                let mut q = match states.get_mut(&instance) {
+                    Some(t) => {
+                        if inmsg[2] == t.0 { // if v-rnd == previous rounds
+                            t.2 += 1; // increase quorum
+                            t.2
+                        }
+                        else if inmsg[2] > t.0 {
+                            // should reset current round?
+                            t.0 = inmsg[2]; // update with newer round
+                            t.1 = inmsg[2]; // corresponding value
+                            t.2 = 1; // reset quorum
+                            1
+                        }
+                        else { t.2 } // older round, keep current
+                        
+                    },
+                    None => { // first time we receive the value
+                        states.insert(instance, (inmsg[2], inmsg[3], 1));
+                        1
+                    }
+                };
+
+                if instance == learned_index { 
+                    while q >= QUORUM { // learn all values!
+                        let val = states[&instance].1; // get value
+                        println!("{}",val); // write it
+                        states.remove(&learned_index); // remove instance
+                        learned_index += 1;
+                        // get the next value. if empty it means we haven't
+                        // seen that particular instance yet
+                        q = match states.get(&learned_index) {
+                            Some(t) => t.1,
+                            None => 0
+                        };
+                    }
+                }
+                //println!("----{:?}", states);
+            },
+            4 => { // learner catch up
+
+            },
+            _ => panic!("learner {} unkown phase: {}", id, phase)
         }
-        stdout().flush().unwrap();
-        return;
-        
+        stdout().flush().unwrap()
     }
 }
 
