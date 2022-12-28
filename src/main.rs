@@ -135,13 +135,15 @@ fn proposer(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                 // send 1A
                 let outmsg = paxos_encode(&[instance_counter, 1, 0]);
                 match s.send_to(&outmsg, cfg.get("acceptors").unwrap()) {
-                    Ok(_) => println!("{}-1A | received val: {}", instance_counter, value),
+                    Ok(_) => (),//println!("{}-1A | received val: {}", instance_counter, value),
                     Err(e) => panic!("couldn't send from proposer, err: {}", e)
                 }
                 instance_counter += 1;
             },
 
             1 => { // phase 2A: received 1B from acceptor
+                println!("recvd: {}", instance);
+
                 match states.get_mut(&instance) {
                     Some(state) => {
                         if state["c-rnd"] == inmsg[2] {
@@ -156,7 +158,7 @@ fn proposer(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                             }
                             
                             if state["q"] >= QUORUM { // if quorum met
-                                println!("quorum reached: {}", state["q"]);
+                                // println!("quorum reached: {}", state["q"]);
                                 // send 2A to acceptors
                                 let payload = [instance, 2, state["c-rnd"], value];
                                 let outmsg = paxos_encode(&payload);
@@ -234,7 +236,7 @@ fn acceptor(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                             let payload = [instance, 2, state["v-rnd"], state["v-val"]];
                             let outmsg = paxos_encode(&payload);
                             match s.send_to(&outmsg, cfg.get("learners").unwrap()) {
-                                Ok(_) => println!("{}-2B | payload: {:?}", instance, payload),
+                                Ok(_) => (),//println!("{}-2B | payload: {:?}", instance, payload),
                                 Err(e) => panic!("couldn't send from acceptor, err: {}", e)
                             }
                         }
@@ -269,10 +271,12 @@ fn learner(cfg: HashMap<String, SocketAddrV4>, id: u16) {
         let instance = inmsg[0]; // paxos instance number
         let phase = inmsg[1];
 
+        println!("recvd: {}", instance);
         
         match phase {
             2 => { // phase 3: received 2B from acceptor
                 // get quorum for received instance and update the states of the values
+                // println!("processing {}", instance);
                 let mut q = match states.get_mut(&instance) {
                     Some(t) => {
                         if inmsg[2] == t.0 { // if v-rnd == previous rounds
@@ -287,7 +291,6 @@ fn learner(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                             1
                         }
                         else { t.2 } // older round, keep current
-                        
                     },
                     None => { // first time we receive the value
                         states.insert(instance, (inmsg[2], inmsg[3], 1));
@@ -297,8 +300,8 @@ fn learner(cfg: HashMap<String, SocketAddrV4>, id: u16) {
 
                 if instance == learned_index { 
                     while q >= QUORUM { // learn all values!
-                        let val = states[&instance].1; // get value
-                        println!("{}",val); // write it
+                        let val = states[&learned_index].1; // get value
+                        println!("{}-{}",learned_index, val); // write it
                         states.remove(&learned_index); // remove instance
                         learned_index += 1;
                         // get the next value. if empty it means we haven't
@@ -332,6 +335,10 @@ fn client(cfg: HashMap<String, SocketAddrV4>, id: u16) {
             Ok(_) => {            
                 let val = val.trim(); //remove \n
                 // try to parse val as integer
+                if val.is_empty() {
+                    println!("blank line, no more values");
+                    break;
+                }
                 match val.parse::<i32>() {
                     Ok(v) => {
                         // on success, send value to proposers
@@ -339,7 +346,7 @@ fn client(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                         let msg = paxos_encode(&[-1, 0, v]);
 
                         match s.send_to(&msg, cfg.get("proposers").unwrap()) {
-                            Ok(_bytes_sent) => println!("client sending: {}", val),
+                            Ok(_bytes_sent) => println!("client {} sending: {}", id, val),
                             Err(e) => panic!("Failed sending message, err: {}", e)
                         }
                     },
@@ -366,7 +373,6 @@ fn main() {
         Ok(h) => h,
         Err(e) => panic!("Failed to parse the configuration file. Err: {}", e),
     };
-    
 
     match role {
         "acceptor" => acceptor(cfg, id),

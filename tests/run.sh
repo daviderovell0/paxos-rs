@@ -34,7 +34,7 @@ echo "starting learners..."
 sleep 1
 echo "starting proposers..."
 
-./proposer.sh 1 &
+#./proposer.sh 1 &
 ./proposer.sh 2 &
 
 echo "waiting to start clients"
@@ -44,7 +44,7 @@ echo "starting clients..."
 ./client.sh 1 < ./prop1 &
 ./client.sh 2 < ./prop2 &
 
-sleep 10
+sleep 5
 
 $KILLCMD
 wait
