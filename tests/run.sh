@@ -42,7 +42,7 @@ sleep 3
 echo "starting clients..."
 
 ./client.sh 1 < ./prop1 &
-./client.sh 2 < ./prop2 &
+#./client.sh 2 < ./prop2 &
 
 sleep 5
 

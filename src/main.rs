@@ -22,12 +22,12 @@ use std::collections::*;
 use std::net::{UdpSocket, Ipv4Addr, SocketAddrV4};
 use socket2::*;
 use std::mem::MaybeUninit;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Receiver};
 
 // CONSTANTS
 const CONFIG_PATH: &str = "paxos.conf"; // wrt where the program is run. assuming home
 const QUORUM: i32 = 2;
-const TIMEOUT: u64 = 600; // in ms
+const TIMEOUT: u64 = 500; // in ms
 
 // AUX FUNCTIONS
 fn parse_cfg() -> Result<HashMap<String, SocketAddrV4>, Error> {
@@ -100,6 +100,51 @@ fn paxos_decode(byte_array: &[MaybeUninit<u8>] , size: usize) -> Vec<i32> {
 
 // PAXOS ROLES
 
+fn proposer_timeout(rx: Receiver<i32>, cfg: HashMap<String, SocketAddrV4>) {
+    let mut instances = Vec::<i32>::new();
+        let thread_socket = mcast_sender();
+        let mut round = 0;
+        loop {
+            
+            match rx.try_recv() { // read instances that reached a quorum
+                Ok(instance) => {
+                    if !instances.contains(&instance) { // could have duplicates
+                        instances.push(instance);
+                    }
+                }
+                // restart incomplete isntances when no more incoming, then timeout
+                Err(_) => {
+                    let mut printout = String::from("Restarted instances:\n");
+                    round += 1; // increase paxos round
+                    let mut prev = -1;     
+                    instances.sort(); // increasing order
+                    for ins in instances.iter() {
+                        if ins != &(prev + 1) {
+                            // hole found, loop over missing instances
+                            for to_restart in prev + 1..*ins {
+                                printout.push_str(&format!("{}-",to_restart));
+                                // send restart message (id=3) to proposers
+                                let outmsg = paxos_encode(&[to_restart, 3, round]);
+                                match thread_socket.send_to(&outmsg, cfg.get("proposers").unwrap()) {
+                                    Ok(_) => (),
+                                    Err(e) => panic!("couldn't send from proposer, err: {}", e)
+                                }
+                            }
+                        }
+                        prev = *ins;
+                    }
+                    // print debug message
+                    if !printout.ends_with("\n") {
+                        println!("{}", printout);
+                    }
+                     
+                    // wait for timeout and re-check
+                    thread::sleep(Duration::from_millis(TIMEOUT));
+                }
+            }
+        }
+}
+
 fn proposer(cfg: HashMap<String, SocketAddrV4>, id: u16) {
     println!("> proposer {}", id);
     // init variables
@@ -111,28 +156,13 @@ fn proposer(cfg: HashMap<String, SocketAddrV4>, id: u16) {
     let mut states = HashMap::<i32, HashMap<&str, i32>>::new();
     let mut instance_counter = 0;
 
+
     // start repeat_paxos thread:
     // restart received instances that do not have a sufficent quorum (< 2A)
     // within a timeout. Cause is message loss
     let (tx, rx) = mpsc::channel();
-    
-    thread::spawn(move || {
-        let mut vec = Vec::<i32>::new();
-        // let (tx2, rx2) = mpsc::channel();
-
-        // thread::spawn(move || {
-            
-        // });
-        loop {
-            let instance = rx.recv().unwrap();
-            println!("thread rx: {}", instance);
-            if !vec.contains(&instance) {
-                vec.push(instance);
-            }
-            println!("waiting");
-            thread::sleep(Duration::from_millis(TIMEOUT));
-        }
-    });
+    let cfg_copy = cfg.clone();
+    thread::spawn(move || proposer_timeout(rx, cfg_copy));
     
     loop {
 
@@ -172,7 +202,7 @@ fn proposer(cfg: HashMap<String, SocketAddrV4>, id: u16) {
 
                 match states.get_mut(&instance) {
                     Some(state) => {
-                        if state["c-rnd"] == inmsg[2] {
+                        if state["c-rnd"] >= inmsg[2] {
                             let mut value = state["c-val"];
                             // increase quorum
                             state.insert("q", state["q"] + 1 );
@@ -189,7 +219,7 @@ fn proposer(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                                 let payload = [instance, 2, state["c-rnd"], value];
                                 let outmsg = paxos_encode(&payload);
                                 match s.send_to(&outmsg, cfg.get("acceptors").unwrap()) {
-                                    Ok(_) => (),//println!("{}-2A | payload: {:?}", instance, &payload),
+                                    Ok(_) => println!("{}-2A | payload: {:?}", instance, &payload),
                                     Err(e) => panic!("couldn't send from proposer, err: {}", e)
                                 }
 
@@ -202,6 +232,24 @@ fn proposer(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                     None => panic!("Instance number {} was never proposed", instance)
                 }
                 },
+            3 => { // restart consensus
+                match states.get_mut(&instance) {
+                    Some(state) => {
+                        // update round
+                        state.insert("c-rnd", inmsg[2]);
+                        // send 1A
+                        let outmsg = paxos_encode(&[instance, 1, inmsg[2]]);
+                        match s.send_to(&outmsg, cfg.get("acceptors").unwrap()) {
+                            Ok(_) => (),//println!("{}-1A | received val: {}", instance_counter, value),
+                            Err(e) => panic!("couldn't send from proposer, err: {}", e)
+                        }
+                        
+                    },
+                    None => panic!("Instance number {} was never proposed", instance)
+                }
+                    
+                   
+            }
             _ => {
                 panic!("acceptor {}, phase {} not recognised", id, phase);
             }
@@ -240,14 +288,14 @@ fn acceptor(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                 let state = states.entry(instance)
                 .or_insert(init_state);
                 
-                if inmsg[2] > state["rnd"] { // inmsg[2] is c-rnd
+                if inmsg[2] >= state["rnd"] { // inmsg[2] is c-rnd
                     state.insert("rnd", inmsg[2]);
 
                     // send 1B
                     let payload = [instance, 1, state["rnd"], state["v-rnd"], state["v-val"]];
                     let outmsg = paxos_encode(&payload);
                     match s.send_to(&outmsg, cfg.get("proposers").unwrap()) {
-                        Ok(_) => (),//println!("{}-1B | payload: {:?}", instance, payload),
+                        Ok(_) => println!("{}-1B | payload: {:?}", instance, payload),
                         Err(e) => panic!("couldn't send from acceptor, err: {}", e)
                     }
                 }
@@ -297,9 +345,7 @@ fn learner(cfg: HashMap<String, SocketAddrV4>, id: u16) {
         let inmsg = paxos_decode(&recvbuf, bytes_n);
         let instance = inmsg[0]; // paxos instance number
         let phase = inmsg[1];
-
-        //println!("recvd: {}", instance);
-        
+      
         match phase {
             2 => { // phase 3: received 2B from acceptor
                 // skip if we've learned the instance
@@ -331,7 +377,7 @@ fn learner(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                 if instance == itl { 
                     while q >= QUORUM { // learn all values!
                         let val = states[&itl].1; // get value
-                        println!("{}-{}",itl, val); // write it
+                        println!("{}",val); // write it
                         states.remove(&itl); // remove instance
                         itl += 1;
                         // get the next value. if empty it means we haven't
@@ -342,16 +388,10 @@ fn learner(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                         };
                     }
                 }
-                //println!("----{:?}", states);
-            },
-            4 => { // learner catch up
-
             },
             _ => panic!("learner {} unkown phase: {}", id, phase)
         }
-        let mut v = states.keys().collect::<Vec<&i32>>();
-        v.sort();
-        println!("{:?}", v);
+
         stdout().flush().unwrap()
     }
 }
@@ -388,6 +428,7 @@ fn client(cfg: HashMap<String, SocketAddrV4>, id: u16) {
             },
             Err(e) => panic!("failed to read stdin. Error: {}", e)
         }
+        thread::sleep(Duration::from_millis(1));
     
     }
 }

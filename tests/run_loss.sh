@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
 # Change the loss percentage here
-LOSS=0.1
+LOSS=0.2
 
 projdir="$1"
-conf=`pwd`/paxos.conf
+#conf=`pwd`/paxosn="$2"
 n="$2"
 
 if [[ x$projdir == "x" || x$n == "x" ]]; then
@@ -13,47 +13,47 @@ if [[ x$projdir == "x" || x$n == "x" ]]; then
 fi
 
 # following line kills processes that have the config file in its cmdline
-KILLCMD="pkill -f $conf"
+KILLCMD="pkill -f paxos-rs"
 
 $KILLCMD
 
 cd $projdir
 
-../loss_set.sh $LOSS
+./loss_set.sh $LOSS
 
-../generate.sh $n > ../prop1
-../generate.sh $n > ../prop2
+./generate.sh $n > ./prop1
+./generate.sh $n > ./prop2
 
 echo "starting acceptors..."
 
-./acceptor.sh 1 $conf &
-./acceptor.sh 2 $conf &
-./acceptor.sh 3 $conf &
+./acceptor.sh 1 &
+./acceptor.sh 2 &
+./acceptor.sh 3 &
 
 sleep 1
 echo "starting learners..."
 
-./learner.sh 1 $conf > ../learn1 &
-./learner.sh 2 $conf > ../learn2 &
+./learner.sh 1 > ./learn1 &
+./learner.sh 2 > ./learn2 &
 
 sleep 1
 echo "starting proposers..."
 
-./proposer.sh 1 $conf &
-./proposer.sh 2 $conf &
+./proposer.sh 1 &
+./proposer.sh 2 &
 
 echo "waiting to start clients"
-sleep 10
+sleep 3
 echo "starting clients..."
 
-./client.sh 1 $conf < ../prop1 &
-./client.sh 2 $conf < ../prop2 &
+./client.sh 1 < ./prop1 &
+#./client.sh 2 < ../prop2 &
 
 sleep 5
 
 $KILLCMD
 wait
 
-../loss_unset.sh
+./loss_unset.sh
 
-cd ..
+cd -
