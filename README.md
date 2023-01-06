@@ -50,8 +50,10 @@ No learner-catch up mechanism is implemented.
 
 ## Credits
 This program was developed as possible solution for the final assignment 
-of the Distributed Algorithms 2022 course at [USI](usi.ch) held by professor 
-[Fernando Pedone](https://www.inf.usi.ch/faculty/pedone/).
+of the [Distributed Algorithms](https://search.usi.ch/en/courses/35265754/distributed-algorithms) 
+2022 course at [USI](usi.ch) held by professor 
+[Fernando Pedone](https://www.inf.usi.ch/faculty/pedone/),
+Eliã Rafael de Lima Batista and Nenad Milosevic.
 
 ## References
 - [1] Lamport, Leslie. “Paxos Made Simple.” (2001). [link](https://lamport.azurewebsites.net/pubs/paxos-simple.pdf)
