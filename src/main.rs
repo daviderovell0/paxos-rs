@@ -311,7 +311,7 @@ fn acceptor(cfg: HashMap<String, SocketAddrV4>, id: u16) {
                             let payload = [instance, 2, state["v-rnd"], state["v-val"]];
                             let outmsg = paxos_encode(&payload);
                             match s.send_to(&outmsg, cfg.get("learners").unwrap()) {
-                                Ok(_) => (),//println!("{}-2B | payload: {:?}", instance, payload),
+                                Ok(_) => println!("{}-2B | payload: {:?}", instance, payload),
                                 Err(e) => panic!("couldn't send from acceptor, err: {}", e)
                             }
                         }
