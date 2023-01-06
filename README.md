@@ -35,7 +35,7 @@ Debugging info and message being sent are written to `stdout`.
 Values proposed and learned are written to `prop<n>` and `learn<n>` files
 respectively.
 
-## Evaluation and limitation
+## Evaluation and limitations
 All values proposed are learned correctly in the vanilla run for an arbitrary 
 number of values proposed. To test with more than 1000 values increase the last 
 sleep timeout in the testing scripts.
